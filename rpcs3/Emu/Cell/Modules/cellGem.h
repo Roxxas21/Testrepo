@@ -1,6 +1,9 @@
 #pragma once
 
-
+#include "gsl.h"
+#include "psmove.h"
+#include "Utilities/Timer.h"
+#include "Utilities/Thread.h"
 
 static const float CELL_GEM_SPHERE_RADIUS_MM = 22.5f;
 
@@ -196,3 +199,94 @@ struct CellGemVideoConvertAttribute
 	be_t<u32> video_data_out;
 	u8 alpha;
 };
+
+// **********************
+// * HLE helper structs *
+// **********************
+
+struct gem_t
+{
+	struct gem_color
+	{
+		float r, g, b;
+
+		gem_color() : r(0.0f), g(0.0f), b(0.0f) {}
+		gem_color(float r_, float g_, float b_)
+		{
+			r = clamp(r_);
+			g = clamp(g_);
+			b = clamp(b_);
+		}
+
+		float clamp(float f) const
+		{
+			return std::max(0.0f, std::min(f, 1.0f));
+		}
+	};
+
+	struct PSMoveDeleter
+	{
+		void operator()(PSMove* p)
+		{
+			psmove_disconnect(p);
+		}
+	};
+
+	struct gem_controller
+	{
+		u32 status;                     // connection status (CELL_GEM_STATUS_DISCONNECTED or CELL_GEM_STATUS_READY)
+		u32 port;                       // assigned port
+		bool enabled_magnetometer;      // whether the magnetometer is enabled (probably used for additional rotational precision)
+		bool calibrated_magnetometer;   // whether the magnetometer is calibrated
+		bool enabled_filtering;         // whether filtering is enabled
+		u8 rumble;                      // rumble intensity
+		gem_color sphere_rgb;           // RGB color of the sphere LED
+
+		// PSMoveAPI data
+		std::unique_ptr<PSMove, PSMoveDeleter> psmove_handle;
+		std::string psmove_serial;		// unique identifier (Bluetooth MAC address)
+
+		gem_controller() :
+			status(CELL_GEM_STATUS_DISCONNECTED),
+			enabled_filtering(false), rumble(0), sphere_rgb() {}
+	};
+
+	CellGemAttribute attribute;
+	CellGemVideoConvertAttribute vc_attribute;
+	u64 status_flags;
+	bool enable_pitch_correction;
+	u32 inertial_counter;
+
+	std::array<gem_controller, CELL_GEM_MAX_NUM> controllers;
+	u32 connected_controllers;
+
+	Timer timer;
+
+	// helper functions
+	bool is_controller_ready(u32 gem_num) const
+	{
+		return controllers[gem_num].status == CELL_GEM_STATUS_READY;
+	}
+
+	void reset_controller(gsl::not_null<gem_t*> gem, u32 gem_num);
+};
+
+// TODO: For LED updating
+/*
+class psmoveapi_thread final : public named_thread
+{
+public:
+	psmoveapi_thread();
+	~psmoveapi_thread() override = default;
+
+	std::string get_name() const override { return "PSMoveAPI Thread"; }
+
+protected:
+	void on_spawn() override;
+	void on_exit() override;
+	void on_task() override;
+public:
+	void on_init(const std::shared_ptr<void>& _this) override;
+	void on_stop() override;
+};
+*/

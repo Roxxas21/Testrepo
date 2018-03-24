@@ -6,104 +6,50 @@
 #include "Emu/System.h"
 #include "Emu/Cell/PPUModule.h"
 #include "pad_thread.h"
-#include "Utilities/Timer.h"
+#include "psmove.h"
+
+#include <climits>
 
 logs::channel cellGem("cellGem");
-
-// **********************
-// * HLE helper structs *
-// **********************
-
-struct gem_t
-{
-	struct gem_color
-	{
-		float r, g, b;
-
-		gem_color() : r(0.0f), g(0.0f), b(0.0f) {}
-		gem_color(float r_, float g_, float b_)
-		{
-			r = clamp(r_);
-			g = clamp(g_);
-			b = clamp(b_);
-		}
-
-		float clamp(float f) const
-		{
-			return std::max(0.0f, std::min(f, 1.0f));
-		}
-	};
-
-	struct gem_controller
-	{
-		u32 status;                     // connection status (CELL_GEM_STATUS_DISCONNECTED or CELL_GEM_STATUS_READY)
-		u32 port;                       // assigned port
-		bool enabled_magnetometer;      // whether the magnetometer is enabled (probably used for additional rotational precision)
-		bool calibrated_magnetometer;   // whether the magnetometer is calibrated
-		bool enabled_filtering;         // whether filtering is enabled
-		u8 rumble;                      // rumble intensity
-		gem_color sphere_rgb;           // RGB color of the sphere LED
-
-		gem_controller() :
-			status(CELL_GEM_STATUS_DISCONNECTED),
-			enabled_filtering(false), rumble(0), sphere_rgb() {}
-	};
-
-	CellGemAttribute attribute;
-	CellGemVideoConvertAttribute vc_attribute;
-	u64 status_flags;
-	bool enable_pitch_correction;
-	u32 inertial_counter;
-
-	std::array<gem_controller, CELL_GEM_MAX_NUM> controllers;
-	u32 connected_controllers;
-
-	Timer timer;
-
-	// helper functions
-	bool is_controller_ready(u32 gem_num) const
-	{
-		return controllers[gem_num].status == CELL_GEM_STATUS_READY;
-	}
-
-	void reset_controller(u32 gem_num)
-	{
-		switch (g_cfg.io.move)
-		{
-		default:
-		case move_handler::null:
-		{
-			connected_controllers = 0;
-
-			controllers[gem_num].status = CELL_GEM_STATUS_DISCONNECTED;
-			controllers[gem_num].port = 0;
-			break;
-		}
-
-		case move_handler::fake:
-		{
-			// fake one connected controller
-			connected_controllers = 1;
-
-			if (gem_num < connected_controllers)
-			{
-				controllers[gem_num].status = CELL_GEM_STATUS_READY;
-				controllers[gem_num].port = 7u - gem_num;
-			}
-			else
-			{
-				controllers[gem_num].status = CELL_GEM_STATUS_DISCONNECTED;
-				controllers[gem_num].port = 0;
-			}
-			break;
-		}
-		}
-	}
-};
 
 // ************************
 // * HLE helper functions *
 // ************************
+
+void gem_t::reset_controller(gsl::not_null<gem_t*> gem, u32 gem_num)
+{
+	switch (g_cfg.io.move)
+	{
+	default:
+	case move_handler::null:
+	{
+		connected_controllers = 0;
+		break;
+	}
+	case move_handler::fake:
+	{
+		connected_controllers = 1;
+		break;
+	}
+	case move_handler::move:
+	{
+		connected_controllers = gem->connected_controllers;
+		break;
+	}
+	}
+
+	// Assign status and port number
+	if (gem_num < connected_controllers)
+	{
+		controllers[gem_num].status = CELL_GEM_STATUS_READY;
+		controllers[gem_num].port = 7u - gem_num;
+	}
+	else
+	{
+		controllers[gem_num].status = CELL_GEM_STATUS_DISCONNECTED;
+		controllers[gem_num].port = 0;
+	}
+}
 
 template <>
 void fmt_class_string<move_handler>::format(std::string& out, u64 arg)
@@ -114,6 +60,7 @@ void fmt_class_string<move_handler>::format(std::string& out, u64 arg)
 		{
 		case move_handler::null: return "Null";
 		case move_handler::fake: return "Fake";
+		case move_handler::move: return "PSMove";
 		}
 
 		return unknown;
@@ -130,6 +77,72 @@ static bool check_gem_num(const u32 gem_num)
 	return gem_num >= 0 && gem_num < CELL_GEM_MAX_NUM;
 }
 
+namespace move
+{
+
+namespace psmoveapi
+{
+
+static void init(gsl::not_null<gem_t*> gem)
+{
+	if (!psmove_init(PSMOVE_CURRENT_VERSION)) {
+		fmt::throw_exception("Couldn't initialize PSMoveAPI");
+		// TODO: Don't die
+	}
+
+	gem->connected_controllers = psmove_count_connected();
+
+	for (auto id = 0; id < gem->connected_controllers; ++id)
+	{
+		PSMove* connected_controller = psmove_connect_by_id(id);
+
+		if (connected_controller)
+		{
+			const std::string serial = psmove_get_serial(connected_controller);
+
+			gem->controllers[id].psmove_serial = serial;
+			gem->controllers[id].psmove_handle.reset(connected_controller);
+		}
+	}
+}
+
+bool poll(const gem_t::gem_controller& controller)
+{
+	bool poll_success = true;
+	thread_local auto seq_old = 0;
+	auto seq = psmove_poll(controller.psmove_handle.get());
+
+	if (!seq)
+	{
+		cellGem.error("psmoveapi: polling failed");
+		poll_success = false;
+	}
+	else
+	{
+		if ((seq_old > 0) && ((seq_old % 16) != (seq - 1))) {
+			cellGem.error("psmoveapi: dropped frames");
+			poll_success = false;
+		}
+	}
+
+	seq_old = seq;
+	return poll_success;
+}
+
+void update_rumble(gem_t::gem_controller& controller)
+{
+	psmove_set_rumble(controller.psmove_handle.get(), controller.rumble);
+}
+
+void update_color(const gem_t::gem_controller& controller)
+{
+	const auto color = controller.sphere_rgb;
+	psmove_set_leds(controller.psmove_handle.get(), color.r * 255, color.g * 255, color.b * 255);
+}
+
+} // namespace psmoveapi
+
+namespace map {
 
 /**
  * \brief Maps Move controller data (digital buttons, and analog Trigger data) to DS3 pad input.
@@ -139,7 +152,7 @@ static bool check_gem_num(const u32 gem_num)
  * \param analog_t Analog value of Move's Trigger. Currently mapped to R2.
  * \return true on success, false if port_no controller is invalid
  */
-static bool map_to_ds3_input(const u32 port_no, be_t<u16>& digital_buttons, be_t<u16>& analog_t)
+static bool ds3_input_to_pad(const u32 port_no, be_t<u16>& digital_buttons, be_t<u16>& analog_t)
 {
 	const auto handler = fxm::get<pad_thread>();
 
@@ -239,7 +252,7 @@ static bool map_to_ds3_input(const u32 port_no, be_t<u16>& digital_buttons, be_t
  * \param ext External data to modify
  * \return true on success, false if port_no controller is invalid
  */
-static bool map_ext_to_ds3_input(const u32 port_no, CellGemExtPortData& ext)
+static bool ds3_input_to_ext(const u32 port_no, CellGemExtPortData& ext)
 {
 	const auto handler = fxm::get<pad_thread>();
 
@@ -276,6 +289,44 @@ static bool map_ext_to_ds3_input(const u32 port_no, CellGemExtPortData& ext)
 	return true;
 }
 
+static bool psmove_input_to_pad(const gem_t::gem_controller& controller, be_t<u16>& digital_buttons, be_t<u16>& analog_t)
+{
+	const auto handle = controller.psmove_handle.get();
+	const auto buttons = psmove_get_buttons(handle);
+	const auto trigger = psmove_get_trigger(handle);
+
+	memset(&digital_buttons, 0, sizeof(digital_buttons));
+
+	if (buttons & Btn_MOVE)
+		digital_buttons |= CELL_GEM_CTRL_MOVE;
+	if (buttons & Btn_T)
+		digital_buttons |= CELL_GEM_CTRL_T;
+
+	if (buttons & Btn_CROSS)
+		digital_buttons |= CELL_GEM_CTRL_CROSS;
+	if (buttons & Btn_CIRCLE)
+		digital_buttons |= CELL_GEM_CTRL_CIRCLE;
+	if (buttons & Btn_SQUARE)
+		digital_buttons |= CELL_GEM_CTRL_SQUARE;
+	if (buttons & Btn_TRIANGLE)
+		digital_buttons |= CELL_GEM_CTRL_TRIANGLE;
+	if (buttons & Btn_SELECT)
+		digital_buttons |= CELL_GEM_CTRL_SELECT;
+	if (buttons & Btn_START)
+		digital_buttons |= CELL_GEM_CTRL_START;
+
+	analog_t = trigger * float(USHRT_MAX) / float(CHAR_MAX);
+
+	return false;
+}
+static bool psmove_input_to_gem(const u32 gem_num, vm::ptr<CellGemState>& gem_state)
+{
+	return false;
+}
+
+} // namespace map
+} // namespace move
+
 // *********************
 // * cellGem functions *
 // *********************
@@ -295,7 +346,7 @@ s32 cellGemCalibrate(u32 gem_num)
 		return CELL_GEM_ERROR_INVALID_PARAMETER;
 	}
 
-	if (g_cfg.io.move == move_handler::fake)
+	// if (g_cfg.io.move == move_handler::fake)
 	{
 		gem->controllers[gem_num].calibrated_magnetometer = true;
 		gem->status_flags = CELL_GEM_FLAG_CALIBRATION_OCCURRED | CELL_GEM_FLAG_CALIBRATION_SUCCEEDED;
@@ -418,7 +469,13 @@ s32 cellGemForceRGB(u32 gem_num, float r, float g, float b)
 		return CELL_GEM_ERROR_INVALID_PARAMETER;
 	}
 
-	gem->controllers[gem_num].sphere_rgb = gem_t::gem_color(r, g, b);
+	auto& controller = gem->controllers[gem_num];
+	controller.sphere_rgb = gem_t::gem_color(r, g, b);
+
+	if (g_cfg.io.move == move_handler::move)
+	{
+		move::psmoveapi::update_color(controller);
+	}
 
 	return CELL_OK;
 }
@@ -432,6 +489,23 @@ s32 cellGemGetAccelerometerPositionInDevice()
 s32 cellGemGetAllTrackableHues(vm::ptr<u8> hues)
 {
 	cellGem.todo("cellGemGetAllTrackableHues(hues=*0x%x)");
+	const auto gem = fxm::get<gem_t>();
+
+	if (!gem)
+	{
+		return CELL_GEM_ERROR_UNINITIALIZED;
+	}
+
+	if (!hues)
+	{
+		return CELL_GEM_ERROR_INVALID_PARAMETER;
+	}
+
+	for (auto i = 0; i < 360; ++i)
+	{
+		hues[i] = true;
+	}
+
 	return CELL_OK;
 }
 
@@ -456,9 +530,25 @@ s32 cellGemGetCameraState(vm::ptr<CellGemCameraState> camera_state)
 	return CELL_OK;
 }
 
-s32 cellGemGetEnvironmentLightingColor()
+s32 cellGemGetEnvironmentLightingColor(vm::ptr<float> r, vm::ptr<float> g, vm::ptr<float> b)
 {
-	UNIMPLEMENTED_FUNC(cellGem);
+	cellGem.todo("cellGemGetEnvironmentLightingColor(r=*0x%x, g=*0x%x, b=*0x%x)", r, g, b);
+	const auto gem = fxm::get<gem_t>();
+
+	if (!gem)
+	{
+		return CELL_GEM_ERROR_UNINITIALIZED;
+	}
+
+	if (!r || !g || !b)
+	{
+		return CELL_GEM_ERROR_INVALID_PARAMETER;
+	}
+
+	*r = 128;
+	*g = 128;
+	*b = 128;
+
 	return CELL_OK;
 }
 
@@ -499,6 +589,22 @@ s32 cellGemGetImageState(u32 gem_num, vm::ptr<CellGemImageState> image_state)
 		image_state->projectionx = 1;
 		image_state->projectiony = 1;
 	}
+	else
+	{
+		auto shared_data = fxm::get_always<gem_camera_shared>();
+
+		image_state->frame_timestamp = shared_data->frame_timestamp.load();
+		image_state->timestamp = image_state->frame_timestamp + 10;   // arbitrarily define 10 usecs of frame processing
+		image_state->visible = true;
+		image_state->u = 0;
+		image_state->v = 0;
+		image_state->r = 20;
+		image_state->r_valid = true;
+		image_state->distance = 2 * 1000;   // 2 meters away from camera
+											// TODO
+		image_state->projectionx = 1;
+		image_state->projectiony = 1;
+	}
 
 	return CELL_OK;
 }
@@ -518,17 +624,31 @@ s32 cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, vm::ptr<
 		return CELL_GEM_ERROR_INVALID_PARAMETER;
 	}
 
+	// TODO(velocity): Abstract with gem state func
 	if (g_cfg.io.move == move_handler::fake)
 	{
-		map_to_ds3_input(gem_num, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
-		map_ext_to_ds3_input(gem_num, inertial_state->ext);
-
-		inertial_state->timestamp = gem->timer.GetElapsedTimeInMicroSec();
-
-		inertial_state->counter = gem->inertial_counter++;
-
-		inertial_state->accelerometer[0] = 10;
+		move::map::ds3_input_to_pad(gem_num, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
+		move::map::ds3_input_to_ext(gem_num, inertial_state->ext);
 	}
+
+	if (g_cfg.io.move == move_handler::move)
+	{
+		const auto const& handle = gem->controllers[gem_num];
+
+		if (move::psmoveapi::poll(handle))
+		{
+			move::map::psmove_input_to_pad(handle, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
+			// move::map::psmove_input_to_gem(gem_num, inertial_state);
+		}
+		else
+		{
+
+		}
+	}
+
+	inertial_state->timestamp = gem->timer.GetElapsedTimeInMicroSec();
+	inertial_state->counter = gem->inertial_counter++;
+	inertial_state->accelerometer[0] = 10;
 
 	return CELL_OK;
 }
@@ -634,15 +754,27 @@ s32 cellGemGetState(u32 gem_num, u32 flag, u64 time_parameter, vm::ptr<CellGemSt
 
 	if (g_cfg.io.move == move_handler::fake)
 	{
-		map_to_ds3_input(gem_num, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
-		map_ext_to_ds3_input(gem_num, gem_state->ext);
-
-		gem_state->tracking_flags = CELL_GEM_TRACKING_FLAG_POSITION_TRACKED |
-									CELL_GEM_TRACKING_FLAG_VISIBLE;
-		gem_state->timestamp = gem->timer.GetElapsedTimeInMicroSec();
-
-		gem_state->quat[3] = 1.0;
+		move::map::ds3_input_to_pad(gem_num, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
+		move::map::ds3_input_to_ext(gem_num, gem_state->ext);
 	}
+
+	if (g_cfg.io.move == move_handler::move)
+	{
+		const auto& handle = gem->controllers[gem_num];
+
+		if (move::psmoveapi::poll(handle))
+		{
+			move::map::psmove_input_to_pad(handle, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
+			// move::map::psmove_input_to_gem(gem_num, gem_state);
+
+		}
+	}
+
+	gem_state->tracking_flags = CELL_GEM_TRACKING_FLAG_POSITION_TRACKED |
+		CELL_GEM_TRACKING_FLAG_VISIBLE;
+	gem_state->timestamp = gem->timer.GetElapsedTimeInMicroSec();
+
+	gem_state->quat[3] = 1.0;
 
 	return CELL_GEM_NOT_CONNECTED;
 }
@@ -696,9 +828,15 @@ s32 cellGemInit(vm::cptr<CellGemAttribute> attribute)
 
 	gem->attribute = *attribute;
 
+	if (g_cfg.io.move == move_handler::move)
+	{
+		// Initialize psmoveapi
+		move::psmoveapi::init(gem.get());
+	}
+
 	for (auto gem_num = 0; gem_num < CELL_GEM_MAX_NUM; gem_num++)
 	{
-		gem->reset_controller(gem_num);
+		gem->reset_controller(gem.get(), gem_num);
 	}
 
 	// TODO: is this correct?
@@ -786,7 +924,7 @@ s32 cellGemReset(u32 gem_num)
 		return CELL_GEM_ERROR_INVALID_PARAMETER;
 	}
 
-	gem->reset_controller(gem_num);
+	gem->reset_controller(gem.get(), gem_num);
 
 	// TODO: is this correct?
 	gem->timer.Start();
@@ -809,7 +947,13 @@ s32 cellGemSetRumble(u32 gem_num, u8 rumble)
 		return CELL_GEM_ERROR_INVALID_PARAMETER;
 	}
 
-	gem->controllers[gem_num].rumble = rumble;
+	auto& controller = gem->controllers[gem_num];
+	controller.rumble = rumble;
+
+	if (g_cfg.io.move == move_handler::move)
+	{
+		move::psmoveapi::update_rumble(controller);
+	}
 
 	return CELL_OK;
 }
