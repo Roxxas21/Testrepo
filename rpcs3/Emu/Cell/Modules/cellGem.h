@@ -5,6 +5,8 @@
 #include "Utilities/Timer.h"
 #include "Utilities/Thread.h"
 
+#include <map>
+
 static const float CELL_GEM_SPHERE_RADIUS_MM = 22.5f;
 
 // Error codes
@@ -246,6 +248,10 @@ struct gem_t
 		std::unique_ptr<PSMove, PSMoveDeleter> psmove_handle;
 		std::string psmove_serial;		// unique identifier (Bluetooth MAC address)
 
+		// Buffered controller data, used for filling polling gaps
+		CellGemState buffered_gem_state;
+		CellGemInertialState buffered_inertial_state;
+
 		gem_controller() :
 			status(CELL_GEM_STATUS_DISCONNECTED),
 			enabled_filtering(false), rumble(0), sphere_rgb() {}
@@ -271,22 +277,42 @@ struct gem_t
 	void reset_controller(gsl::not_null<gem_t*> gem, u32 gem_num);
 };
 
-// TODO: For LED updating
+// TODO: Maybe not needed, tracked seems to do led updating itself
 /*
+namespace move {
+namespace psmoveapi {
+
 class psmoveapi_thread final : public named_thread
 {
 public:
-	psmoveapi_thread();
+	psmoveapi_thread() = default;
 	~psmoveapi_thread() override = default;
 
 	std::string get_name() const override { return "PSMoveAPI Thread"; }
 
+	semaphore<> mutex_poll;
+
+	std::map<u32, PSMove*> m_controllers;
+
+	void register_controller(u32 id, PSMove* controller)
+	{
+		m_controllers[id] = controller;
+	}
+
+	void unregister_controller(u32 id)
+	{
+		m_controllers.erase(id);
+	}
+
 protected:
-	void on_spawn() override;
-	void on_exit() override;
+	// void on_spawn() override;
+	// void on_exit() override;
 	void on_task() override;
 public:
-	void on_init(const std::shared_ptr<void>& _this) override;
-	void on_stop() override;
+	// void on_init(const std::shared_ptr<void>& _this) override;
+	// void on_stop() override;
 };
+
+} // namespace psmoveapi
+} // namespace move
 */

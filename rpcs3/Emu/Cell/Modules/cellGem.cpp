@@ -6,7 +6,9 @@
 #include "Emu/System.h"
 #include "Emu/Cell/PPUModule.h"
 #include "pad_thread.h"
+
 #include "psmove.h"
+#include "psmove_tracker.h"
 
 #include <climits>
 
@@ -90,6 +92,8 @@ static void init(gsl::not_null<gem_t*> gem)
 		// TODO: Don't die
 	}
 
+	// const auto g_psmove = fxm::make<psmoveapi_thread>();
+
 	gem->connected_controllers = psmove_count_connected();
 
 	for (auto id = 0; id < gem->connected_controllers; ++id)
@@ -102,31 +106,50 @@ static void init(gsl::not_null<gem_t*> gem)
 
 			gem->controllers[id].psmove_serial = serial;
 			gem->controllers[id].psmove_handle.reset(connected_controller);
+
+			// g_psmove->register_controller(id, connected_controller);
 		}
 	}
 }
 
-bool poll(const gem_t::gem_controller& controller)
+bool poll(PSMove* controller_handle)
 {
-	bool poll_success = true;
+	bool poll_success = false;
 	thread_local auto seq_old = 0;
-	auto seq = psmove_poll(controller.psmove_handle.get());
+
+	/*
+	auto seq = psmove_poll(controller_handle);
 
 	if (!seq)
 	{
-		cellGem.error("psmoveapi: polling failed");
+		cellGem.fatal("psmoveapi: %02d %02d polling failed", seq_old, seq);
 		poll_success = false;
 	}
 	else
 	{
 		if ((seq_old > 0) && ((seq_old % 16) != (seq - 1))) {
-			cellGem.error("psmoveapi: dropped frames");
+			cellGem.fatal("psmoveapi: %02d %02d dropped frames", seq_old, seq);
 			poll_success = false;
 		}
+		else
+		{
+			cellGem.error("psmoveapi: %02d %02d success", seq_old, seq);
+		}
+	}
+	seq_old = seq;
+	*/
+
+	// consume all buffered data
+	while (auto seq = psmove_poll(controller_handle)) {
+		poll_success = true;
 	}
 
-	seq_old = seq;
 	return poll_success;
+}
+
+bool poll(const gem_t::gem_controller& controller)
+{
+	return move::psmoveapi::poll(controller.psmove_handle.get());
 }
 
 void update_rumble(gem_t::gem_controller& controller)
@@ -139,6 +162,47 @@ void update_color(const gem_t::gem_controller& controller)
 	const auto color = controller.sphere_rgb;
 	psmove_set_leds(controller.psmove_handle.get(), color.r * 255, color.g * 255, color.b * 255);
 }
+
+/*
+void psmoveapi_thread::on_task()
+{
+	while (fxm::check<camera_thread>() && !Emu.IsStopped())
+	{
+		std::chrono::steady_clock::time_point frame_start = std::chrono::steady_clock::now();
+
+		if (Emu.IsPaused())
+		{
+			std::this_thread::sleep_for(1ms);
+			continue;
+		}
+
+		{
+			semaphore_lock lock(mutex_poll);
+
+			for (auto controller : m_controllers)
+			{
+				const auto handle = controller.second;
+
+				move::psmoveapi::poll(handle);
+			}
+		}
+
+		//std::this_thread::sleep_for(10ms);
+
+		const std::chrono::microseconds frame_target_time{ static_cast<u32>(1000000.0 / 90) };
+
+		std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+
+		std::chrono::microseconds frame_processing_time = std::chrono::duration_cast<std::chrono::microseconds>(now - frame_start);
+
+		if (frame_processing_time < frame_target_time)
+		{
+			std::chrono::microseconds frame_idle_time = frame_target_time - frame_processing_time;
+			std::this_thread::sleep_for(frame_idle_time);
+		}
+	}
+}
+*/
 
 } // namespace psmoveapi
 
@@ -315,12 +379,53 @@ static bool psmove_input_to_pad(const gem_t::gem_controller& controller, be_t<u1
 	if (buttons & Btn_START)
 		digital_buttons |= CELL_GEM_CTRL_START;
 
-	analog_t = trigger * float(USHRT_MAX) / float(CHAR_MAX);
+	analog_t = trigger * float(USHRT_MAX) / float(UCHAR_MAX);
+
+	return true;
+}
+static bool psmove_input_to_gem(const gem_t::gem_controller& controller, vm::ptr<CellGemState>& gem_state)
+{
+	const auto handle = controller.psmove_handle.get();
+
+	if (!psmove_has_calibration(handle))
+	{
+		__debugbreak();
+	}
 
 	return false;
 }
-static bool psmove_input_to_gem(const u32 gem_num, vm::ptr<CellGemState>& gem_state)
+
+static bool psmove_input_to_inertial(const gem_t::gem_controller& controller, vm::ptr<CellGemInertialState>& inertial_state)
 {
+	const auto handle = controller.psmove_handle.get();
+
+	if (!psmove_has_calibration(handle))
+	{
+		__debugbreak();
+	}
+
+	float ax, ay, az;
+	psmove_get_accelerometer_frame(handle, Frame_SecondHalf, &ax, &ay, &az);
+	auto* ac = inertial_state->accelerometer;
+	ac[0] = ax;
+	ac[1] = ay;
+	ac[2] = az;
+	ac[3] = 0;
+
+	float gx, gy, gz;
+	psmove_get_gyroscope_frame(handle, Frame_SecondHalf, &gx, &gy, &gz);
+	auto* gr = inertial_state->gyro;
+	gr[0] = gx;
+	gr[1] = gy;
+	gr[2] = gz;
+	gr[3] = 0;
+
+	auto ac_b = inertial_state->accelerometer_bias;
+	ac_b[0] = ac_b[1] = ac_b[2] = ac_b[3] = 0;
+
+	auto gr_b = inertial_state->gyro_bias;
+	gr_b[0] = gr_b[1] = gr_b[2] = gr_b[3] = 0;
+
 	return false;
 }
 
@@ -633,22 +738,26 @@ s32 cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, vm::ptr<
 
 	if (g_cfg.io.move == move_handler::move)
 	{
-		const auto const& handle = gem->controllers[gem_num];
+		auto& handle = gem->controllers[gem_num];
 
 		if (move::psmoveapi::poll(handle))
 		{
 			move::map::psmove_input_to_pad(handle, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
-			// move::map::psmove_input_to_gem(gem_num, inertial_state);
+			move::map::psmove_input_to_inertial(handle, inertial_state);
+
+			// save inertial_state
+			handle.buffered_inertial_state = *inertial_state;
 		}
 		else
 		{
-
+			// polling failed, load saved inertial_state
+			*inertial_state = handle.buffered_inertial_state;
 		}
 	}
 
+	// TODO: should this be in if above?
 	inertial_state->timestamp = gem->timer.GetElapsedTimeInMicroSec();
 	inertial_state->counter = gem->inertial_counter++;
-	inertial_state->accelerometer[0] = 10;
 
 	return CELL_OK;
 }
@@ -760,13 +869,22 @@ s32 cellGemGetState(u32 gem_num, u32 flag, u64 time_parameter, vm::ptr<CellGemSt
 
 	if (g_cfg.io.move == move_handler::move)
 	{
-		const auto& handle = gem->controllers[gem_num];
+		auto& handle = gem->controllers[gem_num];
 
 		if (move::psmoveapi::poll(handle))
 		{
 			move::map::psmove_input_to_pad(handle, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
-			// move::map::psmove_input_to_gem(gem_num, gem_state);
+			move::map::psmove_input_to_gem(handle, gem_state);
 
+			// save gem_state
+			handle.buffered_gem_state = *gem_state;
+			// cellGem.fatal("SUCCESS %d", gem_state->pad.digitalbuttons.value() & CELL_GEM_CTRL_MOVE);
+		}
+		else
+		{
+			// polling failed, load saved gem_state
+			*gem_state = handle.buffered_gem_state;
+			// cellGem.fatal("FAILLLL %d", gem_state->pad.digitalbuttons.value() & CELL_GEM_CTRL_MOVE);
 		}
 	}
 
