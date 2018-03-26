@@ -248,10 +248,6 @@ struct gem_t
 		std::unique_ptr<PSMove, PSMoveDeleter> psmove_handle;
 		std::string psmove_serial;		// unique identifier (Bluetooth MAC address)
 
-		// Buffered controller data, used for filling polling gaps
-		CellGemState buffered_gem_state;
-		CellGemInertialState buffered_inertial_state;
-
 		gem_controller() :
 			status(CELL_GEM_STATUS_DISCONNECTED),
 			enabled_filtering(false), rumble(0), sphere_rgb() {}

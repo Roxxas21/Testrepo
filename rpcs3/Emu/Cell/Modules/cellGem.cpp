@@ -112,14 +112,7 @@ static void init(gsl::not_null<gem_t*> gem)
 	}
 }
 
-enum class poll_result
-{
-	fail,
-	success,
-	too_soon,
-};
-
-poll_result poll(PSMove* controller_handle)
+bool poll(PSMove* controller_handle)
 {
 
 	/*
@@ -144,31 +137,21 @@ poll_result poll(PSMove* controller_handle)
 	seq_old = seq;
 	*/
 
+
+	bool poll_success = false;
 	thread_local std::uint8_t seq_old = 0;
-	thread_local auto last_poll = std::chrono::high_resolution_clock::now();
 
-	const auto now = std::chrono::high_resolution_clock::now();
-	if (now - last_poll < 10ms) {
-		// This is needed because games call functions like cellGemGetState and cellGemGetInertialState
-		// in quick succession, resulting successive polls, resulting in polls after the first one failing
-		// ...resulting in our implementation supplying the game with the previous state (state preservation)
-		// instead of translating current button state.
-		// We can't remove state buffering/preservation either, because if polling fails
-		return poll_result::too_soon;
-	}
-
-	auto result = poll_result::fail;
+	auto result = false;
 
 	// consume all buffered data
-	while (std::uint8_t seq = psmove_poll(controller_handle)) {
-		result = poll_result::success;
-		last_poll = std::chrono::high_resolution_clock::now();
+	while (psmove_poll(controller_handle)) {
+		poll_success = true;
 	}
 
-	return result;
+	return poll_success;
 }
 
-poll_result poll(const gem_t::gem_controller& controller)
+bool poll(const gem_t::gem_controller& controller)
 {
 	return move::psmoveapi::poll(controller.psmove_handle.get());
 }
@@ -764,18 +747,10 @@ s32 cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, vm::ptr<
 	{
 		auto& handle = gem->controllers[gem_num];
 		move::psmoveapi::poll(handle);
-		//if (move::psmoveapi::poll(handle) != move::psmoveapi::poll_result::fail)
+		if (move::psmoveapi::poll(handle))
 		{
 			move::map::psmove_input_to_pad(handle, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
 			move::map::psmove_input_to_inertial(handle, inertial_state);
-
-			// save inertial_state
-			handle.buffered_inertial_state = *inertial_state;
-		}
-		//else
-		{
-			// polling failed, load saved inertial_state
-			// *inertial_state = handle.buffered_inertial_state;
 		}
 	}
 
@@ -895,20 +870,10 @@ s32 cellGemGetState(u32 gem_num, u32 flag, u64 time_parameter, vm::ptr<CellGemSt
 	{
 		auto& handle = gem->controllers[gem_num];
 		move::psmoveapi::poll(handle);
-		// if (move::psmoveapi::poll(handle) != move::psmoveapi::poll_result::fail)
+		if (move::psmoveapi::poll(handle))
 		{
 			move::map::psmove_input_to_pad(handle, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
 			move::map::psmove_input_to_gem(handle, gem_state);
-
-			// save gem_state
-			handle.buffered_gem_state = *gem_state;
-			// cellGem.fatal("SUCCESS %d", gem_state->pad.digitalbuttons.value() & CELL_GEM_CTRL_MOVE);
-		}
-		// else
-		{
-			// polling failed, load saved gem_state
-			// *gem_state = handle.buffered_gem_state;
-			// cellGem.fatal("FAILLLL %d", gem_state->pad.digitalbuttons.value() & CELL_GEM_CTRL_MOVE);
 		}
 	}
 
