@@ -98,16 +98,26 @@ static void init(gsl::not_null<gem_t*> gem)
 
 	for (auto id = 0; id < gem->connected_controllers; ++id)
 	{
-		PSMove* connected_controller = psmove_connect_by_id(id);
+		PSMove* controller_handle = psmove_connect_by_id(id);
 
-		if (connected_controller)
+		if (controller_handle)
 		{
-			const std::string serial = psmove_get_serial(connected_controller);
+			const std::string serial = psmove_get_serial(controller_handle);
 
-			gem->controllers[id].psmove_serial = serial;
-			gem->controllers[id].psmove_handle.reset(connected_controller);
+			auto& gem_controller = gem->controllers[id];
+
+			gem_controller.psmove_serial = serial;
+			gem_controller.psmove_handle.reset(controller_handle);
 
 			// g_psmove->register_controller(id, connected_controller);
+
+			psmove_set_orientation_fusion_type(controller_handle,
+				PSMoveOrientation_Fusion_Type::OrientationFusion_ComplementaryMARG);
+			psmove_enable_orientation(controller_handle, PSMove_True);
+			gem_controller.enable_orientation = psmove_has_orientation(controller_handle);
+
+
+
 		}
 	}
 }
@@ -399,6 +409,15 @@ static bool psmove_input_to_gem(const gem_t::gem_controller& controller, vm::ptr
 		__debugbreak();
 	}
 
+	float w, x, y, z;
+	psmove_get_orientation(handle, &w, &x, &y, &z);
+	gem_state->quat[0] = x;
+	gem_state->quat[1] = y;
+	gem_state->quat[2] = z;
+	gem_state->quat[3] = w;
+
+	// gem_state->
+
 	return false;
 }
 
@@ -413,19 +432,19 @@ static bool psmove_input_to_inertial(const gem_t::gem_controller& controller, vm
 
 	float ax, ay, az;
 	psmove_get_accelerometer_frame(handle, Frame_SecondHalf, &ax, &ay, &az);
-	auto* ac = inertial_state->accelerometer;
-	ac[0] = ax;
-	ac[1] = ay;
-	ac[2] = az;
-	ac[3] = 0;
+	inertial_state->accelerometer[0] = ax;
+	inertial_state->accelerometer[1] = ay;
+	inertial_state->accelerometer[2] = az;
+	inertial_state->accelerometer[3] = 0;
 
 	float gx, gy, gz;
 	psmove_get_gyroscope_frame(handle, Frame_SecondHalf, &gx, &gy, &gz);
-	auto* gr = inertial_state->gyro;
-	gr[0] = gx;
-	gr[1] = gy;
-	gr[2] = gz;
-	gr[3] = 0;
+	inertial_state->gyro[0] = gx;
+	inertial_state->gyro[1] = gy;
+	inertial_state->gyro[2] = gz;
+	inertial_state->gyro[3] = 0;
+
+	// cellGem.fatal TODO
 
 	auto ac_b = inertial_state->accelerometer_bias;
 	ac_b[0] = ac_b[1] = ac_b[2] = ac_b[3] = 0;
@@ -701,7 +720,7 @@ s32 cellGemGetImageState(u32 gem_num, vm::ptr<CellGemImageState> image_state)
 		image_state->projectionx = 1;
 		image_state->projectiony = 1;
 	}
-	else
+	else if (g_cfg.io.move == move_handler::move)
 	{
 		auto shared_data = fxm::get_always<gem_camera_shared>();
 
@@ -742,16 +761,14 @@ s32 cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, vm::ptr<
 		move::map::ds3_input_to_pad(gem_num, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
 		move::map::ds3_input_to_ext(gem_num, inertial_state->ext);
 	}
-
-	if (g_cfg.io.move == move_handler::move)
+	else if (g_cfg.io.move == move_handler::move)
 	{
 		auto& handle = gem->controllers[gem_num];
+
 		move::psmoveapi::poll(handle);
-		if (move::psmoveapi::poll(handle))
-		{
-			move::map::psmove_input_to_pad(handle, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
-			move::map::psmove_input_to_inertial(handle, inertial_state);
-		}
+
+		move::map::psmove_input_to_pad(handle, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
+		move::map::psmove_input_to_inertial(handle, inertial_state);
 	}
 
 	// TODO: should this be in if above?
@@ -865,16 +882,15 @@ s32 cellGemGetState(u32 gem_num, u32 flag, u64 time_parameter, vm::ptr<CellGemSt
 		move::map::ds3_input_to_pad(gem_num, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
 		move::map::ds3_input_to_ext(gem_num, gem_state->ext);
 	}
-
-	if (g_cfg.io.move == move_handler::move)
+	else if (g_cfg.io.move == move_handler::move)
 	{
 		auto& handle = gem->controllers[gem_num];
+
 		move::psmoveapi::poll(handle);
-		if (move::psmoveapi::poll(handle))
-		{
-			move::map::psmove_input_to_pad(handle, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
-			move::map::psmove_input_to_gem(handle, gem_state);
-		}
+
+		move::map::psmove_input_to_pad(handle, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
+		move::map::psmove_input_to_gem(handle, gem_state);
+
 	}
 
 	gem_state->tracking_flags = CELL_GEM_TRACKING_FLAG_POSITION_TRACKED |

@@ -247,6 +247,7 @@ struct gem_t
 		// PSMoveAPI data
 		std::unique_ptr<PSMove, PSMoveDeleter> psmove_handle;
 		std::string psmove_serial;		// unique identifier (Bluetooth MAC address)
+		bool enable_orientation;		// whether `psmove_enable_orientation` has been called and succeeded
 
 		gem_controller() :
 			status(CELL_GEM_STATUS_DISCONNECTED),
