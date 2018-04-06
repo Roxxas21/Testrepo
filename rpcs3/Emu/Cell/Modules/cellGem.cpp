@@ -124,7 +124,6 @@ static void init(gsl::not_null<gem_t*> gem)
 
 bool poll(PSMove* controller_handle)
 {
-
 	/*
 	auto seq = psmove_poll(controller_handle);
 
@@ -168,7 +167,11 @@ bool poll(const gem_t::gem_controller& controller)
 
 void update_rumble(gem_t::gem_controller& controller)
 {
-	psmove_set_rumble(controller.psmove_handle.get(), controller.rumble);
+	const auto  handle = controller.psmove_handle.get();
+
+	psmove_set_rumble(handle, controller.rumble);
+	psmove_update_leds(handle);
+
 }
 
 void update_color(const gem_t::gem_controller& controller)
@@ -406,7 +409,7 @@ static bool psmove_input_to_gem(const gem_t::gem_controller& controller, vm::ptr
 
 	if (!psmove_has_calibration(handle))
 	{
-		__debugbreak();
+		fmt::throw_exception("You need to calibrate your Move Motion controller!");
 	}
 
 	float w, x, y, z;
@@ -427,30 +430,32 @@ static bool psmove_input_to_inertial(const gem_t::gem_controller& controller, vm
 
 	if (!psmove_has_calibration(handle))
 	{
-		__debugbreak();
+		fmt::throw_exception("You need to calibrate your Move Motion controller!");
 	}
 
 	float ax, ay, az;
 	psmove_get_accelerometer_frame(handle, Frame_SecondHalf, &ax, &ay, &az);
 	inertial_state->accelerometer[0] = ax;
-	inertial_state->accelerometer[1] = ay;
-	inertial_state->accelerometer[2] = az;
+	inertial_state->accelerometer[1] = az;
+	inertial_state->accelerometer[2] = ay;
 	inertial_state->accelerometer[3] = 0;
 
 	float gx, gy, gz;
 	psmove_get_gyroscope_frame(handle, Frame_SecondHalf, &gx, &gy, &gz);
 	inertial_state->gyro[0] = gx;
-	inertial_state->gyro[1] = gy;
-	inertial_state->gyro[2] = gz;
+	inertial_state->gyro[1] = gz;
+	inertial_state->gyro[2] = gy;
 	inertial_state->gyro[3] = 0;
-
-	// cellGem.fatal TODO
 
 	auto ac_b = inertial_state->accelerometer_bias;
 	ac_b[0] = ac_b[1] = ac_b[2] = ac_b[3] = 0;
 
 	auto gr_b = inertial_state->gyro_bias;
 	gr_b[0] = gr_b[1] = gr_b[2] = gr_b[3] = 0;
+
+	LOG_FATAL(GENERAL, "Accel: { x: %+01.3f y: %+01.3f z: %+01.3f w: %+01.3f }  Gyro: { x: %+01.3f y: %+01.3f z: %+01.3f w: %+01.3f }  ",
+		inertial_state->accelerometer[0], inertial_state->accelerometer[1], inertial_state->accelerometer[2], inertial_state->accelerometer[3],
+		inertial_state->gyro[0], inertial_state->gyro[1], inertial_state->gyro[2], inertial_state->gyro[3]);
 
 	return false;
 }
@@ -771,6 +776,8 @@ s32 cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, vm::ptr<
 		move::map::psmove_input_to_inertial(handle, inertial_state);
 	}
 
+	// TODO: handle timestamp arg by storing previous states
+
 	// TODO: should this be in if above?
 	inertial_state->timestamp = gem->timer.GetElapsedTimeInMicroSec();
 	inertial_state->counter = gem->inertial_counter++;
@@ -829,7 +836,7 @@ s32 cellGemGetRGB(u32 gem_num, vm::ptr<float> r, vm::ptr<float> g, vm::ptr<float
 		return CELL_GEM_ERROR_UNINITIALIZED;
 	}
 
-	if (!check_gem_num(gem_num) | !r || !g || !b )
+	if (!check_gem_num(gem_num) || !r || !g || !b )
 	{
 		return CELL_GEM_ERROR_INVALID_PARAMETER;
 	}
