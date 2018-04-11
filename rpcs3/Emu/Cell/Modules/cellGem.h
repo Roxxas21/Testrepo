@@ -1,6 +1,11 @@
 #pragma once
 
+#include "gsl.h"
+#include "psmove.h"
+#include "Utilities/Timer.h"
+#include "Utilities/Thread.h"
 
+#include <map>
 
 static const float CELL_GEM_SPHERE_RADIUS_MM = 22.5f;
 
@@ -210,3 +215,43 @@ struct CellGemVideoConvertAttribute
 	be_t<u32> video_data_out;
 	u8 alpha;
 };
+
+// TODO: Maybe not needed, tracked seems to do led updating itself
+/*
+namespace move {
+namespace psmoveapi {
+
+class psmoveapi_thread final : public named_thread
+{
+public:
+	psmoveapi_thread() = default;
+	~psmoveapi_thread() override = default;
+
+	std::string get_name() const override { return "PSMoveAPI Thread"; }
+
+	semaphore<> mutex_poll;
+
+	std::map<u32, PSMove*> m_controllers;
+
+	void register_controller(u32 id, PSMove* controller)
+	{
+		m_controllers[id] = controller;
+	}
+
+	void unregister_controller(u32 id)
+	{
+		m_controllers.erase(id);
+	}
+
+protected:
+	// void on_spawn() override;
+	// void on_exit() override;
+	void on_task() override;
+public:
+	// void on_init(const std::shared_ptr<void>& _this) override;
+	// void on_stop() override;
+};
+
+} // namespace psmoveapi
+} // namespace move
+*/
