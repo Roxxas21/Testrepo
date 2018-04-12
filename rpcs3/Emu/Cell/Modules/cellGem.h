@@ -90,7 +90,7 @@ enum
 };
 
 // Video conversion flags
-enum
+enum CellGemVideoConvertFlagEnum
 {
 	CELL_GEM_AUTO_WHITE_BALANCE           = 0x1,
 	CELL_GEM_GAMMA_BOOST                  = 0x2,
@@ -99,7 +99,7 @@ enum
 };
 
 // Video conversion output formats
-enum
+enum CellGemVideoConvertFormatEnum
 {
 	CELL_GEM_NO_VIDEO_OUTPUT           = 1,
 	CELL_GEM_RGBA_640x480              = 2,
@@ -205,8 +205,8 @@ struct CellGemState
 struct CellGemVideoConvertAttribute
 {
 	be_t<s32> version;
-	be_t<s32> output_format;
-	be_t<s32> conversion_flags;
+	be_t<CellGemVideoConvertFormatEnum> output_format;
+	be_t<CellGemVideoConvertFlagEnum> conversion_flags;
 	be_t<f32> gain;
 	be_t<f32> red_gain;
 	be_t<f32> green_gain;
@@ -216,7 +216,7 @@ struct CellGemVideoConvertAttribute
 	u8 alpha;
 };
 
-// TODO: Maybe not needed, tracked seems to do led updating itself
+// TODO: Maybe not needed, tracker seems to do led updating itself
 /*
 namespace move {
 namespace psmoveapi {
