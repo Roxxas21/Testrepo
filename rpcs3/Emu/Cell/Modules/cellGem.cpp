@@ -37,6 +37,11 @@ struct gem_t
 		{
 			return std::max(0.0f, std::min(f, 1.0f));
 		}
+
+		bool is_black() const
+		{
+			return r == 0.0f && g == 0.0f && b == 0.0f;
+		}
 	};
 
 	struct PSMoveDeleter
@@ -276,26 +281,70 @@ namespace tracker
 			{
 				psmove_tracker_set_auto_update_leds(tracker, handle, PSMove_True);
 				psmove_tracker_set_exposure(tracker, PSMoveTracker_Exposure::Exposure_MEDIUM);
-
-				// enable tracker for controller
-				for (;;)
-				{
-					const auto tracker_status = psmove_tracker_enable(tracker, handle);
-					if (tracker_status == Tracker_CALIBRATED)
-					{
-						break;
-					}
-					switch(tracker_status)
-					{
-					case Tracker_NOT_CALIBRATED: LOG_ERROR(HLE, "PSMoveAPI: Controller not registered with tracker");  break;
-					case Tracker_CALIBRATION_ERROR: LOG_ERROR(HLE, "PSMoveAPI: Calibration failed (check lighting, visibility)");  break;
-					case Tracker_TRACKING: LOG_ERROR(HLE, "PSMoveAPI: Calibrated and successfully tracked in the camera");  break;
-					default: ;
-					}
-				}
 			}
 		}
 		gem->psmove.tracker.reset(tracker);
+	}
+
+	void enable(gsl::not_null<gem_t*> gem, u32 gem_num)
+	{
+		const auto& controller = gem->controllers[gem_num];
+		const auto handle = controller.psmove.handle.get();
+		const auto color = controller.sphere_rgb;
+
+		PSMoveTracker_Status enable_status;
+
+		// enable tracker for controller
+		for (;;)
+		{
+			PSMoveTracker_Status tracker_status;
+
+			if (color.is_black())
+			{
+				tracker_status = psmove_tracker_enable(gem->psmove.tracker.get(), handle);
+			}
+			else
+			{
+				tracker_status = psmove_tracker_enable_with_color(gem->psmove.tracker.get(), handle,
+					color.r * 255, color.g * 255, color.b * 255);
+			}
+
+			if (tracker_status == Tracker_CALIBRATED)
+			{
+				LOG_ERROR(HLE, "PSMoveAPI: Calibrated");	// TODO: remove
+				break;
+			}
+			switch (tracker_status)
+			{
+			case Tracker_NOT_CALIBRATED: LOG_ERROR(HLE, "PSMoveAPI: Controller not registered with tracker");  break;
+			case Tracker_CALIBRATION_ERROR: LOG_ERROR(HLE, "PSMoveAPI: Calibration failed (check lighting, visibility)");  break;
+			case Tracker_TRACKING: LOG_ERROR(HLE, "PSMoveAPI: Calibrated and successfully tracked in the camera");  break;
+			default:;
+			}
+		}
+	}
+
+	void disable(gsl::not_null<gem_t*> gem, u32 gem_num)
+	{
+		const auto& handle = gem->controllers[gem_num].psmove.handle.get();
+
+		psmove_tracker_disable(gem->psmove.tracker.get(), handle);
+	}
+
+	void update(gsl::not_null<gem_t*> gem)
+	{
+		const auto tracker = gem->psmove.tracker.get();
+
+		// TODO: Run in cellCamera?
+		psmove_tracker_update_image(tracker);
+
+		const auto connected = gem->psmove.connected_tracker_controllers;
+		for (auto id = 0; id < connected; ++id)
+		{
+			const auto& handle = gem->controllers[id].psmove.handle.get();
+
+			psmove_tracker_update(tracker, handle);
+		}
 	}
 } // namespace tracker
 
@@ -641,7 +690,7 @@ s32 cellGemCalibrate(u32 gem_num)
 
 	if (g_cfg.io.move == move_handler::move)
 	{
-		move::psmoveapi::tracker::init(gem.get());
+		move::psmoveapi::tracker::enable(gem.get(), gem_num);
 	}
 
 	return CELL_OK;
@@ -910,17 +959,25 @@ s32 cellGemGetImageState(u32 gem_num, vm::ptr<CellGemImageState> image_state)
 	}
 	else if (g_cfg.io.move == move_handler::move)
 	{
-		auto shared_data = fxm::get_always<gem_camera_shared>();
+		const auto shared_data = fxm::get_always<gem_camera_shared>();
+		const auto tracker = gem->psmove.tracker.get();
+		const auto handle = gem->controllers[gem_num].psmove.handle.get();
+
+		s32 width, height;
+		psmove_tracker_get_size(tracker, &width, &height);
+
+		float x, y, radius;
+		const auto age = psmove_tracker_get_position(tracker, handle, &x, &y, &radius) * 1000;  // ms -> us
+		const auto distance = psmove_tracker_distance_from_radius(tracker, radius) * 10;  // cm -> mm
 
 		image_state->frame_timestamp = shared_data->frame_timestamp.load();
-		image_state->timestamp = image_state->frame_timestamp + 10;   // arbitrarily define 10 usecs of frame processing
+		image_state->timestamp = image_state->frame_timestamp + age;
 		image_state->visible = true;
-		image_state->u = 0;
-		image_state->v = 0;
-		image_state->r = 20;
+		image_state->u = x  * width;
+		image_state->v = y * height;
+		image_state->r = radius;
 		image_state->r_valid = true;
-		image_state->distance = 2 * 1000;   // 2 meters away from camera
-											// TODO
+		image_state->distance = distance;
 		image_state->projectionx = 1;
 		image_state->projectiony = 1;
 	}
@@ -1161,12 +1218,14 @@ s32 cellGemHSVtoRGB(f32 h, f32 s, f32 v, vm::ptr<f32> r, vm::ptr<f32> g, vm::ptr
 s32 cellGemInit(vm::cptr<CellGemAttribute> attribute)
 {
 	cellGem.warning("cellGemInit(attribute=*0x%x)", attribute);
-	const auto gem = fxm::make<gem_t>();
 
-	if (!gem)
-	{
-		return CELL_GEM_ERROR_ALREADY_INITIALIZED;
-	}
+	const auto gem = fxm::make_always<gem_t>();
+	//const auto gem = fxm::make<gem_t>();
+
+	//if (!gem)
+	//{
+	//	return CELL_GEM_ERROR_ALREADY_INITIALIZED;
+	//}
 
 	if (!attribute || !attribute->spurs_addr || attribute->max_connect > CELL_GEM_MAX_NUM)
 	{
@@ -1213,6 +1272,11 @@ s32 cellGemInvalidateCalibration(s32 gem_num)
 		// TODO: gem->status_flags
 	}
 
+	if (g_cfg.io.move == move_handler::move)
+	{
+		move::psmoveapi::tracker::disable(gem.get(), gem_num);
+	}
+
 	return CELL_OK;
 }
 
@@ -1243,6 +1307,11 @@ s32 cellGemPrepareCamera(s32 max_exposure, f32 image_quality)
 	image_quality = std::clamp(image_quality, 0.0f, 1.0f);
 
 	// TODO: prepare camera
+
+	if (g_cfg.io.move == move_handler::move)
+	{
+		move::psmoveapi::tracker::init(gem.get());
+	}
 
 	return CELL_OK;
 }
@@ -1408,6 +1477,11 @@ s32 cellGemUpdateFinish()
 	if (!gem)
 	{
 		return CELL_GEM_ERROR_UNINITIALIZED;
+	}
+
+	if (g_cfg.io.move == move_handler::move)
+	{
+		move::psmoveapi::tracker::update(gem.get());
 	}
 
 	return CELL_OK;
